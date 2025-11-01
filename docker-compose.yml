@@ -8,6 +8,11 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      # Provide your data.gov.in API key here or via host env
+      - DATA_GOV_API_KEY=${DATA_GOV_API_KEY}
+      # Optional: resource IDs for rainfall and crop datasets (CKAN)
+      - RAINFALL_RESOURCE_ID=${RAINFALL_RESOURCE_ID}
+      - CROP_PRODUCTION_RESOURCE_ID=${CROP_PRODUCTION_RESOURCE_ID}
 
   frontend:
     build:

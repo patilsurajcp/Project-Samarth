@@ -1,11 +1,56 @@
+import os
 import requests
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Data.gov.in API endpoints
-RAINFALL_API = "https://data.gov.in/node/135611/datastore/export/json"
-CROP_PRODUCTION_API = "https://data.gov.in/node/135612/datastore/export/json"
+# Data.gov.in API endpoints (fallback export endpoints if API key/resources are not provided)
+RAINFALL_EXPORT_API = "https://data.gov.in/node/135611/datastore/export/json"
+CROP_PRODUCTION_EXPORT_API = "https://data.gov.in/node/135612/datastore/export/json"
+
+# CKAN Datastore API base
+CKAN_DATASTORE_URL = "https://data.gov.in/api/datastore/resource.json"
+
+DATA_GOV_API_KEY = os.getenv("DATA_GOV_API_KEY", "").strip()
+RAINFALL_RESOURCE_ID = os.getenv("RAIN_FALL_RESOURCE_ID", os.getenv("RAINFALL_RESOURCE_ID", "").strip())
+CROP_PRODUCTION_RESOURCE_ID = os.getenv("CROP_PROD_RESOURCE_ID", os.getenv("CROP_PRODUCTION_RESOURCE_ID", "").strip())
+
+def fetch_ckan_resource(resource_id: str, limit: int = 1000, offset: int = 0, filters: dict | None = None, timeout: int = 10):
+    """
+    Fetch records from data.gov.in CKAN datastore for a given resource.
+
+    Requires env DATA_GOV_API_KEY to be set. Supports simple pagination via limit/offset.
+    """
+    if not DATA_GOV_API_KEY or not resource_id:
+        return []
+
+    try:
+        params = {
+            "api-key": DATA_GOV_API_KEY,
+            "resource_id": resource_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        if filters:
+            # CKAN expects JSON-encoded filters; requests will encode dict appropriately
+            params["filters"] = filters
+
+        response = requests.get(CKAN_DATASTORE_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            # Standard CKAN returns { result: { records: [...] } }
+            result = data.get("result") or {}
+            records = result.get("records")
+            if isinstance(records, list):
+                return records
+            # Some endpoints may directly return records
+            if "records" in data and isinstance(data["records"], list):
+                return data["records"]
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Failed CKAN fetch for resource {resource_id}: {e}")
+        return []
 
 def fetch_live_data(api_url, timeout=5):
     """
@@ -53,9 +98,46 @@ def fetch_data(entities):
     # Available crops
     crops_list = ["Rice", "Wheat", "Cotton", "Sugarcane", "Maize", "Soybean", "Pulses", "Groundnut", "Sunflower", "Barley"]
 
-    # Try to fetch live data first
-    live_rainfall = fetch_live_data(RAINFALL_API)
-    live_crops = fetch_live_data(CROP_PRODUCTION_API)
+    # Try to fetch via CKAN API first (if API key and resource IDs provided)
+    live_rainfall = []
+    live_crops = []
+
+    if DATA_GOV_API_KEY and (RAINFALL_RESOURCE_ID or CROP_PRODUCTION_RESOURCE_ID):
+        try:
+            # Basic pagination attempt to gather up to ~3000 rows per resource
+            if RAINFALL_RESOURCE_ID:
+                chunk = []
+                offset = 0
+                while True:
+                    records = fetch_ckan_resource(RAINFALL_RESOURCE_ID, limit=1000, offset=offset)
+                    if not records:
+                        break
+                    chunk.extend(records)
+                    if len(records) < 1000:
+                        break
+                    offset += 1000
+                live_rainfall = chunk
+
+            if CROP_PRODUCTION_RESOURCE_ID:
+                chunk = []
+                offset = 0
+                while True:
+                    records = fetch_ckan_resource(CROP_PRODUCTION_RESOURCE_ID, limit=1000, offset=offset)
+                    if not records:
+                        break
+                    chunk.extend(records)
+                    if len(records) < 1000:
+                        break
+                    offset += 1000
+                live_crops = chunk
+        except Exception as e:
+            logger.warning(f"CKAN fetch error: {e}")
+
+    # Fallback to public export endpoints if CKAN not configured or empty
+    if not live_rainfall:
+        live_rainfall = fetch_live_data(RAINFALL_EXPORT_API)
+    if not live_crops:
+        live_crops = fetch_live_data(CROP_PRODUCTION_EXPORT_API)
 
     # If live data is available, use it; otherwise use mock data
     if live_rainfall:
@@ -92,5 +174,5 @@ def fetch_data(entities):
             "https://data.gov.in/catalog/rainfall-india",
             "https://data.gov.in/catalog/state-wise-season-wise-crop-production-statistics"
         ],
-        "data_source": "live" if live_rainfall or live_crops else "mock"
+        "data_source": "live" if (live_rainfall or live_crops) else "mock"
     }
